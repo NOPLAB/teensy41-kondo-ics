@@ -5,14 +5,22 @@ authors = ["nop <noplab90@gmail.com>"]
 edition = "2021"
 
 [dependencies]
-cortex-m = "0.7"
-embedded-hal = "0.2"
+cortex-m = "0.7.7"
+embedded-hal = "0.2.7"
 # Remove me if you don't want logging.
-log = "0.4"
-teensy4-panic = "0.2"
+log = "0.4.20"
+teensy4-panic = "0.2.3"
+cortex-m-rtic = "1.1.4"
+rtic-monotonics = { version = "1.5.0", features = [
+    "imxrt",
+    "imxrt_gpt1",
+    "imxrt_gpt2",
+    "cortex-m-systick",
+] }
+nb = "1"
 
 [dependencies.teensy4-bsp]
-version = "0.4"
+version = "0.4.6"
 features = [
     # Use the BSP's runtime. This lets you write your
     # `main()` function.
