@@ -1,35 +1,19 @@
-//! Demonstrates a loopback UART peripheral.
-//!
-//! It uses the alpha board, with the following pinout:
-//!
-//! - Pin 14 is TX.
-//! - Pin 15 is RX.
-//!
-//! Baud rate is 115200bps.
-//!
-//! Every time you send the Teensy a character, it replies with
-//! that same character, and it toggles the LED.
-
 #![no_std]
 #![no_main]
 
-use core::{
-    convert::Infallible,
-    future::{self, IntoFuture},
-};
+use core::convert::Infallible;
 
-use embedded_hal::{
-    blocking::{self, serial::Write},
-    serial::Read,
-};
-use rtic_monotonics::imxrt;
+use embedded_hal::{blocking::serial::Write, serial::Read};
+
 use teensy4_bsp as bsp;
 use teensy4_panic as _;
 
 use bsp::{
     board,
-    hal::{lpuart::ReadFlags, timer::Blocking},
-    ral,
+    hal::{
+        lpuart::{ReadFlags, Status},
+        timer::Blocking,
+    },
 };
 
 #[bsp::rt::entry]
@@ -41,24 +25,23 @@ fn main() -> ! {
         mut gpio4,
         lpuart6,
         usb,
+        mut dma,
         ..
     } = board::t41(board::instances());
+
     bsp::LoggingFrontend::default_log().register_usb(usb);
+
     let mut delay = Blocking::<_, { board::PERCLK_FREQUENCY }>::from_pit(pit.0);
+
     let led = board::led(&mut gpio2, pins.p13);
+
     let mut enable_pin = gpio4.output(pins.p2);
+
     let mut lpuart6: board::Lpuart6 = board::lpuart(lpuart6, pins.p1, pins.p0, 115200);
+
     lpuart6.disable(|lpuart| {
-        // lpuart.enable_fifo(Watermark::tx(3));
-        // lpuart.enable_fifo(Watermark::rx(NonZeroU32::new(3).unwrap()));
         lpuart.set_parity(Some(bsp::hal::lpuart::Parity::Even));
     });
-
-    // loop {
-    //     led.toggle();
-    //     let byte = nb::block!(lpuart6.read()).unwrap();
-    // nb::block!(lpuart6.write(byte)).unwrap();
-    // }
 
     enable_pin.clear();
 
@@ -66,12 +49,44 @@ fn main() -> ! {
     delay.block_ms(1000);
     led.clear();
 
+    log::info!("Hello from the USB logger!");
+
+    let mut dma_channel = dma[0].take().unwrap();
+
     loop {
-        servo_pos(&mut delay, &mut lpuart6, &mut enable_pin, 7500);
+        // servo_pos(&mut delay, &mut lpuart6, &mut enable_pin, 7500);
+        // delay.block_ms(3000);
+        // servo_pos(&mut delay, &mut lpuart6, &mut enable_pin, 5500);
+        // delay.block_ms(3000);
+        // servo_pos(&mut delay, &mut lpuart6, &mut enable_pin, 9500);
+        // delay.block_ms(3000);
+
+        servo_pos_dma(
+            &mut delay,
+            &mut dma_channel,
+            &mut lpuart6,
+            &mut enable_pin,
+            7500,
+        )
+        .unwrap();
         delay.block_ms(3000);
-        servo_pos(&mut delay, &mut lpuart6, &mut enable_pin, 5500);
+        servo_pos_dma(
+            &mut delay,
+            &mut dma_channel,
+            &mut lpuart6,
+            &mut enable_pin,
+            5500,
+        )
+        .unwrap();
         delay.block_ms(3000);
-        servo_pos(&mut delay, &mut lpuart6, &mut enable_pin, 9500);
+        servo_pos_dma(
+            &mut delay,
+            &mut dma_channel,
+            &mut lpuart6,
+            &mut enable_pin,
+            9500,
+        )
+        .unwrap();
         delay.block_ms(3000);
     }
 }
@@ -115,6 +130,7 @@ where
 
 fn servo_pos_dma<D, U, const N: u8, P, E>(
     delay: &mut D,
+    dma_channel: &mut bsp::hal::dma::channel::Channel,
     uart: &mut bsp::hal::lpuart::Lpuart<U, N>,
     enable_pin: &mut P,
     pos: u16,
@@ -126,28 +142,49 @@ where
 {
     enable_pin.set_high().unwrap();
 
-    delay.delay_us(1000);
+    // 13usで動作 余裕を持って20us
+    delay.delay_us(20);
 
     let array = [0x80, h_byte(pos), l_byte(pos)];
 
-    let mut channels = bsp::hal::dma::channels(unsafe { ral::dma::DMA::instance() }, unsafe {
-        ral::dmamux::DMAMUX::instance()
-    });
+    dma_channel.set_disable_on_completion(true);
 
-    uart.dma_write(&mut channels[13].take().unwrap(), &array);
+    uart.clear_status(Status::IDLE);
 
-    delay.delay_us(1000);
+    log::info!("{:?}", uart.status());
+
+    let future = uart.dma_write(dma_channel, &array);
+    spin_on::spin_on(future).unwrap();
+
+    while !uart
+        .status()
+        .contains(Status::TRANSMIT_EMPTY | Status::TRANSMIT_COMPLETE)
+    {
+        log::info!("TX Waiting: {:?}", uart.status());
+        delay.delay_us(100);
+    }
+
+    log::info!("TX Done: {:?}", uart.status());
 
     enable_pin.set_low().unwrap();
 
-    for _ in 0..3 {
-        match uart.read() {
-            Ok(byte) => {
+    delay.delay_us(20);
+
+    log::info!("read start");
+
+    let mut buffer = [0u8; 3];
+    match spin_on::spin_on(uart.dma_read(dma_channel, &mut buffer)) {
+        Ok(_) => {
+            for byte in buffer {
                 log::info!("{byte}");
             }
-            Err(_) => {}
-        };
+        }
+        Err(e) => {
+            log::info!("{:?}", e);
+        }
     }
+
+    log::info!("read end");
 
     Ok(())
 }
